@@ -68,6 +68,23 @@ operation `describe_desktop_application_task` and predicate type
   reads it. Whitespace an app lays out between elements is not checked, and
   values that look like a time the app stamps, in ISO 8601 or as C's
   `asctime` writes it (`Thu Nov  5 09:20:31 2026`), are left out.
+- `notes`: why `files` is empty, or nothing when it is not. Each note has a
+  `code` and a `message`: `no_change` when no file under the home changed
+  between the two checkpoints and nor did the application's dconf keys;
+  `unowned_changes` when files changed but none under the owned paths, with
+  up to five of them in `files`, each with its home path and role (desktop
+  services' files last), and how many more in `more`;
+  `uncheckable_changes` when the application's keys in a dconf database
+  changed, with the database in `files`: no check reads dconf, and the
+  export only writes the keys as they were at the seed checkpoint, so make
+  the task's change one the app saves in a file; `unreadable_changes` when a
+  dconf database changed but REA could not read it, with the read failure in
+  `error` (install `dconf-cli` or set `REA_DCONF_COMMAND` when it is missing),
+  since whose keys changed is then unknown; and `no_document` when no
+  file has the document role, as when no
+  window title shows the file's name. A capture again with `--state-path`
+  naming the file, or `state_paths` on a build computer's
+  `start_build_capture`, makes it the app's.
 
 The suggestions are a starting point. Keep the ones that say what the user
 did; drop the ones that only follow from how the app saves its file. A LibreCAD
@@ -141,7 +158,10 @@ The rules both evaluators follow:
 - A check decided by what a view leaves out (`lines_absent`, `value_absent`,
   `row_absent`, the counts, `value_equals` of a whole object or array, and
   the text checks of an element) fails when that view is truncated; a check
-  satisfied by what the view holds is decided on it.
+  satisfied by what the view holds is decided on it. An element's text is not:
+  the reader may have dropped text from between the runs it kept, so
+  `text_contains` fails on a truncated view even where the kept runs hold its
+  value. A text node or attribute value is whole, and decided.
 
 The export refuses, naming the check, a file outside the owned paths, a file
 spelled with a leading slash, `.` or `..`, a pointer into a file that is text
@@ -301,9 +321,13 @@ capture host's name and user removed, and at the end checkpoint, the
 captured end state. Those are the capture's first and last checkpoints unless
 `--seed-checkpoint` and `--end-checkpoint` name others.
 It refuses a task whose every check passes on the seed, and a check that fails
-on the end state, with that check's reason. A capture yields one task, so the
-option is taken once. The result's `task` names the task, its number of checks
-and those that fail on the seed. A refused task writes no bundle.
+on the end state, with that check's reason. Only a failure on what the seed's
+view shows counts: a task whose checks fail on the seed only because a view
+could not be read or may have left out what they look for, such as a line past
+the 5,000 a text view keeps, is refused, naming each failure. A capture yields
+one task, so the option is taken once. The result's `task` names the task, its
+number of checks and those that fail on what the seed shows. A refused task
+writes no bundle.
 
 The bundle then holds, besides the app and `tasks/smoke.json`:
 

@@ -29,16 +29,27 @@ changed later. Each path records the evidence the capture holds about it:
 | `selected_path`          | It lies under a `--state-path` or absolute `--argument` of the capture    |
 | `dconf_application_keys` | It is a dconf database holding groups whose path names the application    |
 | `desktop_service`        | It lies where desktop services and toolkits keep shared files, or caches  |
+| `desktop_trash`          | It lies in the desktop Trash, `~/.local/share/Trash`                      |
 
 A folder beside a state directory whose name differs from it only in letter
 case counts as that state directory, so a profile the application first
 creates during the capture, such as GIMP's `~/.config/GIMP` beside the
 candidate `~/.config/gimp`, is its state too.
 
-The role follows from the reasons, in this order: `application_state` for
-application keys in dconf, or a state directory outside shared desktop
+The role follows from the reasons, in this order: `shared_desktop` for a file
+in the desktop Trash, which the user deleted, whatever else names it;
+`application_state` for application keys in dconf, or a state directory outside shared desktop
 locations; `document` for a file named in a window title or selected by the
-caller, even if the application holds it open; `application_state` for another
+caller, even if the application holds it open, except that a selected file
+under a hidden folder of the home, such as `~/.config/MuseScore`, a dotfile
+there, or a lock an application holds, such as LibreOffice's `.~lock.<name>#`
+beside a document, is `application_state`, judged by the path as the caller
+named it, so a file reached through `~/.config/MuseScore` stays the application's
+when that folder is a link to `~/settings/MuseScore`; the innermost selected
+path holding a file decides, so a score selected itself inside the link's
+target keeps its own name and is a document (a capture written before it
+recorded selected paths is judged by their physical spelling);
+`application_state` for another
 open file outside shared locations; `shared_desktop` for other files in shared
 locations; `unrelated` otherwise. A window title names a file only when no
 other file name character adjoins the name, so `day.txt` does not match
