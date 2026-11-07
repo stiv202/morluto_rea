@@ -1,0 +1,220 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { expect } from "vitest";
+import { cliTest } from "../../support/cli/cliFixture.js";
+import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { connectLocalToolsMcp } from "../../fixtures/localToolsMcp.js";
+import { parseEvidence } from "../../../src/domain/evidence.js";
+import { otlpTraceSchema } from "../../../src/domain/otlpTrace/otlpTrace.js";
+
+const exportDocument = {
+  resourceSpans: [
+    {
+      resource: {
+        attributes: [
+          { key: "service.name", value: { stringValue: "gateway" } },
+        ],
+      },
+      scopeSpans: [
+        {
+          scope: { name: "net.peer", version: "0.9" },
+          spans: [
+            null,
+            { traceId: "1".repeat(32), spanId: "broken" },
+            {
+              traceId: "1".repeat(32),
+              spanId: "2".repeat(16),
+              name: "handle",
+              kind: 2,
+              startTimeUnixNano: "1000",
+              endTimeUnixNano: "4000",
+              attributes: [
+                { key: "authorization", value: { stringValue: "Bearer t" } },
+                { key: "http.route", value: { stringValue: "/orders" } },
+              ],
+            },
+            {
+              traceId: "1".repeat(32),
+              spanId: "4".repeat(16),
+              parentSpanId: "broken",
+              name: "unreadable-parent",
+            },
+            {
+              traceId: "1".repeat(32),
+              spanId: "3".repeat(16),
+              parentSpanId: "2".repeat(16),
+              name: "fetch",
+              kind: 3,
+              startTimeUnixNano: "1500",
+              endTimeUnixNano: "3000",
+              status: { code: 2, message: "timeout" },
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+const writeExport = async (): Promise<{ root: string; path: string }> => {
+  const root = await createTestTempDirectory("rea-otlp-");
+  const path = join(root, "traces.json");
+  await writeFile(path, JSON.stringify(exportDocument));
+  return { root, path };
+};
+
+cliTest(
+  "inventories a saved OTLP JSON export through real CLI and MCP without a collector",
+  async ({ cli }) => {
+    const fixture = await writeExport();
+    const { call } = await connectLocalToolsMcp({
+      REA_MCP_TOOL_FAMILIES: "application,session",
+      REA_MCP_OUTPUT_SCHEMA_PROFILE: "compact",
+    });
+    const parent = parseEvidence(
+      (await call("inspect_otlp_trace", { path: fixture.path }))
+        .structuredContent,
+    );
+    const { call: callFull } = await connectLocalToolsMcp({
+      REA_MCP_TOOL_FAMILIES: "application,session",
+      REA_MCP_OUTPUT_SCHEMA_PROFILE: "full",
+    });
+    const full = parseEvidence(
+      (await callFull("inspect_otlp_trace", { path: fixture.path }))
+        .structuredContent,
+    );
+    expect(full.normalized_result).toEqual(parent.normalized_result);
+    const report = otlpTraceSchema.parse(parent.normalized_result);
+    expect(report.artifact.path).toBe(fixture.path);
+    expect(report.summary).toMatchObject({
+      spans: 3,
+      roots: 1,
+      orphans: 0,
+      error_status: 1,
+      with_parent: 1,
+      distinct_services: 1,
+    });
+    expect(report.spans[1]).toMatchObject({
+      span_id: "4".repeat(16),
+      parent_span_id: null,
+      parent_span_id_state: "invalid",
+      parent_span_id_raw: "broken",
+    });
+    expect(report.roots).toEqual(["2".repeat(16)]);
+    expect(
+      report.diagnostics
+        .filter((entry) => entry.code === "invalid-record")
+        .map((entry) => entry.source_pointer)
+        .sort(),
+    ).toEqual([
+      "/resourceSpans/0/scopeSpans/0/spans/0",
+      "/resourceSpans/0/scopeSpans/0/spans/1",
+      "/resourceSpans/0/scopeSpans/0/spans/3",
+    ]);
+    expect(report.spans[2]).toMatchObject({
+      span_id: "3".repeat(16),
+      parent_span_id: "2".repeat(16),
+      duration_nano: "1500",
+      status_code: "error",
+      resource_index: 0,
+      scope_index: 0,
+    });
+    expect(report.spans[0]?.attributes[0]?.string_value).toBe("Bearer t");
+    expect(report.resources[0]?.service_name).toBe("gateway");
+    expect(report.scopes[0]).toMatchObject({
+      name: "net.peer",
+      version: "0.9",
+      resource_index: 0,
+    });
+    expect(report.source_coverage).toMatchObject({
+      live_collector: "not-contacted",
+      protobuf_encodings: "not-supported",
+      recording_completeness: "unknown",
+    });
+
+    const run = cli.sharedCliRun?.bind(cli) ?? cli.run.bind(cli);
+    const result = await run({
+      arguments: ["inspect-otlp-trace", fixture.path, "--json"],
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const fromCli = parseEvidence(result.json);
+    expect(fromCli.normalized_result).toEqual(parent.normalized_result);
+  },
+);
+
+cliTest(
+  "rejects a file that is not an OTLP JSON trace export and names it",
+  async ({ cli }) => {
+    const fixture = await writeExport();
+    await writeFile(fixture.path, '{"resourceMetrics":[]}');
+    const { call } = await connectLocalToolsMcp({
+      REA_MCP_TOOL_FAMILIES: "application,session",
+    });
+    const failure = await call("inspect_otlp_trace", { path: fixture.path });
+    expect(failure.isError).toBe(true);
+    expect(failure.content).toEqual([
+      expect.objectContaining({
+        text: expect.stringContaining("resourceSpans"),
+      }),
+    ]);
+
+    const run = cli.sharedCliRun?.bind(cli) ?? cli.run.bind(cli);
+    const result = await run({
+      arguments: ["inspect-otlp-trace", fixture.path, "--json"],
+    });
+    expect(result.exitCode).not.toBe(0);
+  },
+);
+
+cliTest(
+  "reports every span that participates in a parent cycle",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-otlp-cycle-");
+    const path = join(root, "traces.json");
+    const span = (id: string, parent: string): unknown => ({
+      traceId: "1".repeat(32),
+      spanId: id.repeat(16),
+      parentSpanId: parent.repeat(16),
+      name: `span-${id}`,
+      startTimeUnixNano: "1000",
+      endTimeUnixNano: "2000",
+    });
+    await writeFile(
+      path,
+      JSON.stringify({
+        resourceSpans: [
+          {
+            resource: { attributes: [] },
+            scopeSpans: [
+              {
+                scope: { name: "cycle" },
+                spans: [span("2", "3"), span("3", "4"), span("4", "2")],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const { call } = await connectLocalToolsMcp({
+      REA_MCP_TOOL_FAMILIES: "application,session",
+    });
+    const parent = parseEvidence(
+      (await call("inspect_otlp_trace", { path })).structuredContent,
+    );
+    const report = otlpTraceSchema.parse(parent.normalized_result);
+    const cycleDiagnostics = report.diagnostics.filter(
+      (entry) => entry.code === "cycle",
+    );
+    expect(cycleDiagnostics).toHaveLength(3);
+    for (const id of ["2", "3", "4"]) {
+      expect(
+        cycleDiagnostics.some((entry) => entry.message.includes(id.repeat(16))),
+      ).toBe(true);
+    }
+    const run = cli.sharedCliRun?.bind(cli) ?? cli.run.bind(cli);
+    const result = await run({
+      arguments: ["inspect-otlp-trace", path, "--json"],
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+  },
+);
